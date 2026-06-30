@@ -1,0 +1,272 @@
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
+}
+
+resource "azurerm_resource_group" "aks" {
+  name     = "rg-emrys-aks-prod"
+  location = "Australia East"
+}
+
+## AKS Cluster - Production
+
+resource "azurerm_kubernetes_cluster" "main" {
+  name                = "emrys-production"
+  location            = azurerm_resource_group.aks.location
+  resource_group_name = azurerm_resource_group.aks.name
+  dns_prefix          = "production"
+  kubernetes_version  = "1.35.5"
+
+  azure_active_directory_role_based_access_control {
+    admin_group_object_ids = var.admin_group_object_ids
+  }
+
+  automatic_upgrade_channel = "patch"
+  node_os_upgrade_channel   = "NodeImage"
+
+  default_node_pool {
+    name                         = "agentpool"
+    node_count                   = 2
+    vm_size                      = "Standard_D2s_v3"
+    only_critical_addons_enabled = true
+
+    upgrade_settings {
+      max_surge = "33%"
+    }
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  network_profile {
+    network_plugin     = "azure"
+    network_policy     = "cilium"
+    network_data_plane = "cilium"
+  }
+
+  key_vault_secrets_provider {
+    secret_rotation_enabled = false
+  }
+
+  # Maintenance windows - Sunday early morning
+  maintenance_window_auto_upgrade {
+    frequency   = "Weekly"
+    interval    = 1
+    duration    = 4
+    day_of_week = "Sunday"
+    start_time  = "02:00"
+    utc_offset  = "+00:00"
+  }
+
+  maintenance_window_node_os {
+    frequency   = "Weekly"
+    interval    = 1
+    duration    = 4
+    day_of_week = "Sunday"
+    start_time  = "02:00"
+    utc_offset  = "+00:00"
+  }
+}
+
+# User node pool
+# 4 nodes needed for 3 customers with 3 DB replicas each (Standard_D2s_v3 = 4 disks max per node)
+resource "azurerm_kubernetes_cluster_node_pool" "user" {
+  name                  = "userpool"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
+  vm_size               = "Standard_D2s_v3"
+  node_count            = 4
+
+  upgrade_settings {
+    max_surge = "33%"
+  }
+}
+
+## GitOps with Flux
+
+resource "azurerm_kubernetes_cluster_extension" "flux" {
+  name           = "emrys-flux"
+  cluster_id     = azurerm_kubernetes_cluster.main.id
+  extension_type = "microsoft.flux"
+
+  depends_on = [azurerm_kubernetes_cluster_node_pool.user]
+}
+
+resource "azurerm_kubernetes_flux_configuration" "main" {
+  name       = "emrys-production"
+  cluster_id = azurerm_kubernetes_cluster.main.id
+  namespace  = "flux-system"
+
+  git_repository {
+    url             = "ssh://git@github.com/merlrwx/emrys-platform"
+    reference_type  = "branch"
+    reference_value = "main"
+
+    ssh_private_key_base64 = base64encode(file(pathexpand(var.flux_ssh_private_key_path)))
+  }
+
+  # Production uses production paths in GitOps repo
+  kustomizations {
+    name                       = "infra-controllers"
+    path                       = "./gitops/infrastructure/controllers/production"
+    sync_interval_in_seconds   = 300
+    garbage_collection_enabled = true
+  }
+
+  kustomizations {
+    name                       = "infra-configs"
+    path                       = "./gitops/infrastructure/configs/production"
+    sync_interval_in_seconds   = 300
+    depends_on                 = ["infra-controllers"]
+    garbage_collection_enabled = true
+  }
+
+  # CNPG plugin needs cert-manager (in infra-configs) to be ready
+  # Apps depend on this plugin for database backups
+  kustomizations {
+    name                       = "cnpg-plugin"
+    path                       = "./gitops/infrastructure/cnpg-plugin/production"
+    sync_interval_in_seconds   = 300
+    depends_on                 = ["infra-configs"]
+    garbage_collection_enabled = true
+  }
+
+  kustomizations {
+    name                       = "monitoring-controllers"
+    path                       = "./gitops/monitoring/controllers/production"
+    sync_interval_in_seconds   = 300
+    depends_on                 = ["apps"]
+    garbage_collection_enabled = true
+  }
+
+  kustomizations {
+    name                       = "monitoring-configs"
+    path                       = "./gitops/monitoring/configs/production"
+    sync_interval_in_seconds   = 300
+    depends_on                 = ["monitoring-controllers"]
+    garbage_collection_enabled = true
+  }
+
+  kustomizations {
+    name                       = "apps"
+    path                       = "./gitops/apps/production"
+    sync_interval_in_seconds   = 300
+    depends_on                 = ["cnpg-plugin"]
+    garbage_collection_enabled = true
+  }
+
+  scope = "cluster"
+
+  depends_on = [azurerm_kubernetes_cluster_extension.flux]
+}
+
+## Key Vault
+
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_key_vault" "emrys_vault" {
+  name                = "kv-emrys-prod"
+  location            = azurerm_resource_group.aks.location
+  resource_group_name = azurerm_resource_group.aks.name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  sku_name            = "standard"
+
+  soft_delete_retention_days = 7
+  purge_protection_enabled   = false
+
+  rbac_authorization_enabled = true
+  depends_on                 = [azurerm_kubernetes_cluster.main]
+}
+
+resource "azurerm_role_assignment" "kv_admin" {
+  scope                = azurerm_key_vault.emrys_vault.id
+  role_definition_name = "Key Vault Administrator"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+resource "azurerm_role_assignment" "aks_keyvault_secrets_provider" {
+  scope                = azurerm_key_vault.emrys_vault.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_kubernetes_cluster.main.key_vault_secrets_provider[0].secret_identity[0].object_id
+}
+
+## Grafana admin password
+
+resource "random_password" "grafana_admin" {
+  length  = 24
+  special = false
+
+  lifecycle {
+    ignore_changes = all
+  }
+}
+
+resource "azurerm_key_vault_secret" "grafana_admin_password" {
+  name         = "grafana-admin-password"
+  value        = random_password.grafana_admin.result
+  key_vault_id = azurerm_key_vault.emrys_vault.id
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}
+
+resource "azurerm_key_vault_secret" "grafana_admin_user" {
+  name         = "grafana-admin-user"
+  value        = "admin"
+  key_vault_id = azurerm_key_vault.emrys_vault.id
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}
+
+## Placeholder Grafana Telegram credentials
+
+resource "azurerm_key_vault_secret" "grafana_telegram_bot_token" {
+  name         = "grafana-telegram-bot-token"
+  value        = "DEMO:dummy-bot-token-replace-me"
+  key_vault_id = azurerm_key_vault.emrys_vault.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}
+
+resource "azurerm_key_vault_secret" "grafana_telegram_chat_id" {
+  name         = "grafana-telegram-chat-id"
+  value        = "000000000"
+  key_vault_id = azurerm_key_vault.emrys_vault.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}
+
+## Storage account name in Key Vault
+
+resource "azurerm_key_vault_secret" "storage_account_name" {
+  name         = "storage-account-name"
+  value        = azurerm_storage_account.cnpg_backups.name
+  key_vault_id = azurerm_key_vault.emrys_vault.id
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}

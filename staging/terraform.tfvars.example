@@ -1,0 +1,15 @@
+# Azure subscription used by the AzureRM provider.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Entra ID group object IDs that should receive AKS cluster admin access.
+admin_group_object_ids = [
+  "00000000-0000-0000-0000-000000000000",
+]
+
+# Local path where Terraform writes generated GitOps manifests.
+# This should point at this repository's gitops directory.
+gitops_repo_path = "/absolute/path/to/emrys-platform/gitops"
+
+# Private key created for Flux. The public key should be added as a deploy key
+# on the GitHub repository.
+flux_ssh_private_key_path = "~/.ssh/emrys-flux"
