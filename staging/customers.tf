@@ -6,7 +6,6 @@ locals {
   # Add new customers here - just add a name to the list!
   customers = toset([
     "nimue",
-    "taliesin",
   ])
 
   # Configuration shared across all customers

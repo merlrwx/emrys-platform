@@ -46,6 +46,8 @@ resource "azurerm_kubernetes_cluster" "main" {
   # Node OS auto-upgrade for security patches
   node_os_upgrade_channel = "NodeImage"
 
+  oidc_issuer_enabled = true
+
   # System node pool for critical Kubernetes components
   # Tainted with CriticalAddonsOnly so user workloads don't schedule here
   default_node_pool {
@@ -100,7 +102,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   name                  = "userpool"
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = "Standard_D2s_v3"
-  node_count            = 4
+  node_count            = 3
 
   upgrade_settings {
     max_surge = "33%"

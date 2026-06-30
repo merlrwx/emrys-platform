@@ -139,7 +139,6 @@ Add customers in the environment's `customers.tf`:
 locals {
   customers = toset([
     "nimue",
-    "taliesin",
   ])
 }
 ```
@@ -365,4 +364,3 @@ Update the patch in:
 ```text
 gitops/monitoring/controllers/<environment>/kube-prometheus-stack/kustomization.yaml
 ```
-

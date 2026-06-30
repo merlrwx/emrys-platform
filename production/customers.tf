@@ -3,7 +3,6 @@
 locals {
   customers = toset([
     "nimue",
-    "taliesin",
   ])
 
   environment      = "production"
