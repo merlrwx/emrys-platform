@@ -1,0 +1,15 @@
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: nimue-objectstore
+spec:
+  configuration:
+    destinationPath: "https://emrysbackupsstaging.blob.core.windows.net/nimue"
+    azureCredentials:
+      storageAccount:
+        name: nimue-backup-creds
+        key: storage-account-name
+      storageSasToken:
+        name: nimue-backup-creds
+        key: nimue-blob-sas
+  retentionPolicy: "14d"
